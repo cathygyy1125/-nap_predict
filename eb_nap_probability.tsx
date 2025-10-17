@@ -200,7 +200,7 @@ const EBNapProbabilityCalculator = () => {
     const scenarios: Scenario[] = [];
     const prior: ProbMap = priorDistributions[age] || {};
     // 用“n=0”的预测作为基线阈值的 \hat{N}
-    const hatN_base = predictNapCount(prior);
+    const hatN_base = predictNapCount(prior) ?? 0;
     
     // n=0: 纯先验
     scenarios.push({
