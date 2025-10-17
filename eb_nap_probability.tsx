@@ -5,6 +5,15 @@ import React, { useMemo, useState } from 'react';
 import csvText from './小睡次数群体分布 - Sheet1.csv?raw';
 import { getGroupMean } from './group_mean_by_age';
 
+type ProbMap = Record<string, number>;
+type Scenario = {
+  n: number;
+  description: string;
+  probabilities: ProbMap;
+  predicted: number;
+  weights?: string;
+};
+
 const EBNapProbabilityCalculator = () => {
   const S = 7; // 先验强度
   // 短觉降权（计数模型的逐日权重）参数：参见《经验贝叶斯法计算小睡次数.md》第9节
@@ -13,7 +22,7 @@ const EBNapProbabilityCalculator = () => {
 
   // 计算原始均值（不归一化）与期望均值（归一化）
   const getMeans = (age: number): { rawMean: number; expMean: number } => {
-    const prior = priorDistributions[age] || {};
+    const prior: ProbMap = priorDistributions[age] || {};
     const entries = Object.entries(prior).map(([k, v]) => [Number(k), Number(v)] as [number, number]);
     const sumP = entries.reduce((acc, [, p]) => acc + (Number.isFinite(p) ? p : 0), 0);
     const rawCandidate = entries.reduce((acc, [k, p]) => acc + k * (Number.isFinite(p) ? p : 0), 0);
@@ -47,11 +56,15 @@ const EBNapProbabilityCalculator = () => {
 
   // 基于 CSV 先验的规范化分布、σ_full 与 HDI
   const getNormalizedPrior = (age: number): Record<number, number> => {
-    const prior = priorDistributions[age] || {};
-    const total = Object.values(prior).reduce((a: number, b: any) => a + (Number.isFinite(b) ? (b as number) : 0), 0);
-    if (total <= 0) return prior;
+    const prior: ProbMap = priorDistributions[age] || {};
+    const total = Object.values(prior).reduce((a: number, b: number) => a + (Number.isFinite(b) ? b : 0), 0);
+    if (total <= 0) {
+      const out0: Record<number, number> = {};
+      for (const [k, v] of Object.entries(prior)) out0[Number(k)] = Number(v);
+      return out0;
+    }
     const out: Record<number, number> = {};
-    for (const [k, v] of Object.entries(prior)) out[Number(k)] = (v as number) / total;
+    for (const [k, v] of Object.entries(prior)) out[Number(k)] = Number(v) / total;
     return out;
   };
 
@@ -107,13 +120,13 @@ const EBNapProbabilityCalculator = () => {
   };
 
   // 从 CSV 文本解析群体先验分布
-  const priorDistributions = useMemo(() => {
+  const priorDistributions = useMemo<Record<number, ProbMap>>(() => {
     const text = (csvText || '').trim();
     const lines = text.split(/\r?\n/).filter(Boolean);
-    if (lines.length === 0) return {} as any;
+    if (lines.length === 0) return {} as Record<number, ProbMap>;
     // 跳过表头
     const body = lines.slice(1);
-    const map: any = {};
+    const map: Record<number, ProbMap> = {};
     for (const rawLine of body) {
       const line = rawLine.trim();
       if (!line) continue;
@@ -124,14 +137,14 @@ const EBNapProbabilityCalculator = () => {
       if (Number.isNaN(age)) continue;
 
       // 按列顺序读取 0~5 次小睡的百分比（可能为空）
-      const probs: Record<number, number> = {} as any;
+      const probs: ProbMap = {};
       for (let k = 0; k <= 5; k++) {
         const raw = (cells[k + 1] || '').trim();
         if (!raw) continue;
         const num = parseFloat(raw.replace('%', ''));
         if (!Number.isFinite(num)) continue;
         const p = num / 100;
-        if (p > 0) probs[k] = p;
+        if (p > 0) probs[String(k)] = p;
       }
       map[age] = probs;
     }
@@ -146,16 +159,16 @@ const EBNapProbabilityCalculator = () => {
   const FIXED_T = 2.5;
 
   // 计算EB概率（允许使用“有效样本量 n_eff”）
-  const calculateEB = (prior, individualCounts, n_eff) => {
+  const calculateEB = (prior: ProbMap, individualCounts: ProbMap, n_eff: number): ProbMap => {
     const groupWeight = S / (S + n_eff);
     const indWeight = n_eff / (S + n_eff);
     
-    const results = {};
-    const allCounts = new Set([...Object.keys(prior), ...Object.keys(individualCounts)]);
+    const results: ProbMap = {};
+    const allCounts = new Set<string>([...Object.keys(prior), ...Object.keys(individualCounts)]);
     
-    allCounts.forEach(count => {
-      const priorProb = prior[count] || 0;
-      const indProb = individualCounts[count] || 0;
+    allCounts.forEach((count) => {
+      const priorProb = Number(prior[count] || 0);
+      const indProb = Number(individualCounts[count] || 0);
       results[count] = groupWeight * priorProb + indWeight * indProb;
     });
     
@@ -163,24 +176,29 @@ const EBNapProbabilityCalculator = () => {
   };
 
   // 预测最终次数
-  const predictNapCount = (probabilities) => {
-    return Object.entries(probabilities)
-      .reduce((max, [count, prob]) => 
-        prob > max.prob ? { count: Number(count), prob } : max, 
-        { count: null, prob: 0 }
-      ).count;
+  const predictNapCount = (probabilities: ProbMap): number | null => {
+    let maxCount: number | null = null;
+    let maxProb = -1;
+    for (const [countStr, prob] of Object.entries(probabilities)) {
+      const p = Number(prob);
+      if (Number.isFinite(p) && p > maxProb) {
+        maxProb = p;
+        maxCount = Number(countStr);
+      }
+    }
+    return maxCount;
   };
 
   // 生成代表性场景（引入“Nd 达阈值 ⇒ 视作 ρ_d ≥ 1/3”的降权规则）
-  const generateScenarios = (age) => {
+  const generateScenarios = (age: number): Scenario[] => {
     const { minNap, maxNap } = getRetainByMode(age);
-    const validCounts = [];
+    const validCounts: number[] = [];
     for (let i = minNap; i <= maxNap; i++) {
       validCounts.push(i);
     }
     
-    const scenarios = [];
-    const prior = priorDistributions[age];
+    const scenarios: Scenario[] = [];
+    const prior: ProbMap = priorDistributions[age] || {};
     // 用“n=0”的预测作为基线阈值的 \hat{N}
     const hatN_base = predictNapCount(prior);
     
@@ -189,7 +207,7 @@ const EBNapProbabilityCalculator = () => {
       n: 0,
       description: '无个体数据（纯群体先验）',
       probabilities: prior,
-      predicted: predictNapCount(prior)
+      predicted: predictNapCount(prior) ?? 0
     });
     
     // n=3 和 n=7: 代表性案例
@@ -206,9 +224,9 @@ const EBNapProbabilityCalculator = () => {
         const groupWeight = S / (S + n_eff);
         const indWeight = n_eff / (S + n_eff);
 
-        const indCounts = { [napCount]: 1.0 };
-        const probs = calculateEB(prior, indCounts, n_eff);
-        const pred = predictNapCount(probs);
+        const indCounts: ProbMap = { [String(napCount)]: 1.0 };
+        const probs: ProbMap = calculateEB(prior, indCounts, n_eff);
+        const pred = predictNapCount(probs) ?? 0;
         
         scenarios.push({
           n,
@@ -225,7 +243,7 @@ const EBNapProbabilityCalculator = () => {
   };
 
   const scenarios = generateScenarios(selectedAge);
-  const prior = priorDistributions[selectedAge] || {};
+  const prior: ProbMap = priorDistributions[selectedAge] || {};
   const { minNap, maxNap, note } = getRetainByMode(selectedAge);
   const { expMean, rawMean, low, high } = getMeanAndWindow(selectedAge);
 
