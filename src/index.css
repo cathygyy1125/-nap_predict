@@ -1,0 +1,5 @@
+@import "tailwindcss";
+
+/* Optional: smooth fonts and basic body style */
+html, body, #root { height: 100%; }
+body { @apply bg-gray-50 text-gray-800; }
